@@ -26,20 +26,50 @@ $:
     - name: 构建并发布 Release
       <<: *rust-build-env
       stages:
-        - name: 构建 release 二进制
+        - name: 安装交叉编译工具链
           script: |
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              ca-certificates \
+              curl \
+              xz-utils
+            zig_url="https://ziglang.org/download/0.14.1"
+            zig_file="zig-x86_64-linux-0.14.1.tar.xz"
+            curl -L "${zig_url}/${zig_file}" -o /tmp/zig.tar.xz
+            tar -xf /tmp/zig.tar.xz -C /opt
+            ln -s /opt/zig-x86_64-linux-0.14.1/zig /usr/local/bin/zig
+            cargo install cargo-zigbuild --locked
+            rustup target add \
+              x86_64-unknown-linux-gnu \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin
+        - name: 构建多平台 release 二进制
+          script: |
+            set -euo pipefail
             cargo --version
-            cargo build --release
+            zig version
+            cargo build --release --target x86_64-unknown-linux-gnu
+            cargo zigbuild --release --target aarch64-apple-darwin
+            cargo zigbuild --release --target x86_64-apple-darwin
         - name: 打包二进制
           script: |
             set -euo pipefail
+            rm -rf dist
             mkdir -p dist
-            target="$(rustc -vV | awk '/host:/ { print $2 }')"
-            asset="arkts-fmt-${target}"
-            cp target/release/arkts-fmt "dist/${asset}"
-            tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
-            shasum -a 256 "dist/${asset}.tar.gz" \
-              > "dist/${asset}.tar.gz.sha256"
+            package() {
+              target="$1"
+              bin="target/${target}/release/arkts-fmt"
+              asset="arkts-fmt-${target}"
+              cp "${bin}" "dist/${asset}"
+              tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
+              shasum -a 256 "dist/${asset}.tar.gz" \
+                > "dist/${asset}.tar.gz.sha256"
+            }
+            package x86_64-unknown-linux-gnu
+            package aarch64-apple-darwin
+            package x86_64-apple-darwin
+            ls -lh dist
         - name: 创建 Release
           type: git:release
           options:
@@ -48,8 +78,9 @@ $:
               ArkTS formatter release $CNB_BRANCH
 
               Assets:
-              - arkts-fmt-<rust-target>.tar.gz
-              - arkts-fmt-<rust-target>.tar.gz.sha256
+              - arkts-fmt-x86_64-unknown-linux-gnu.tar.gz
+              - arkts-fmt-aarch64-apple-darwin.tar.gz
+              - arkts-fmt-x86_64-apple-darwin.tar.gz
         - name: 上传 Release 附件
           image: cnbcool/attachments:latest
           settings:
