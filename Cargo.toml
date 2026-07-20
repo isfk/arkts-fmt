@@ -1,0 +1,17 @@
+[package]
+name = "arkts-fmt"
+version = "1.0.0"
+edition = "2021"
+description = "ArkTS formatter based on native tree-sitter-arkts"
+license = "MIT"
+
+[dependencies]
+tree-sitter = "0.24"
+tree-sitter-arkts = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
