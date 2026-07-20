@@ -1,0 +1,20 @@
+---
+$:
+  push:
+    - name: Rust 构建
+      docker:
+        image: rust:1.96
+      stages:
+        - name: 构建 release 二进制
+          script: |
+            cargo --version
+            cargo build --release
+  pull_request:
+    - name: Rust 构建
+      docker:
+        image: rust:1.96
+      stages:
+        - name: 构建 release 二进制
+          script: |
+            cargo --version
+            cargo build --release
