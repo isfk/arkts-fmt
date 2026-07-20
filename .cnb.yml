@@ -1,20 +1,58 @@
 ---
+.rust-build-env: &rust-build-env
+  docker:
+    image: rust:1.96
+
 $:
   push:
     - name: Rust 构建
-      docker:
-        image: rust:1.96
+      <<: *rust-build-env
       stages:
         - name: 构建 release 二进制
           script: |
             cargo --version
             cargo build --release
+
   pull_request:
     - name: Rust 构建
-      docker:
-        image: rust:1.96
+      <<: *rust-build-env
       stages:
         - name: 构建 release 二进制
           script: |
             cargo --version
             cargo build --release
+
+  tag_push:
+    - name: 构建并发布 Release
+      <<: *rust-build-env
+      stages:
+        - name: 构建 release 二进制
+          script: |
+            cargo --version
+            cargo build --release
+        - name: 打包二进制
+          script: |
+            set -euo pipefail
+            mkdir -p dist
+            target="$(rustc -vV | awk '/host:/ { print $2 }')"
+            asset="arkts-fmt-${target}"
+            cp target/release/arkts-fmt "dist/${asset}"
+            tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
+            shasum -a 256 "dist/${asset}.tar.gz" \
+              > "dist/${asset}.tar.gz.sha256"
+        - name: 创建 Release
+          type: git:release
+          options:
+            title: $CNB_BRANCH
+            description: |
+              ArkTS formatter release $CNB_BRANCH
+
+              Assets:
+              - arkts-fmt-<rust-target>.tar.gz
+              - arkts-fmt-<rust-target>.tar.gz.sha256
+        - name: 上传 Release 附件
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - dist/*.tar.gz
+              - dist/*.sha256
