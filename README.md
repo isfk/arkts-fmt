@@ -14,7 +14,7 @@ ArkTS 代码格式化工具 — 基于 native
 需要 Rust 工具链：
 
 ```bash
-git clone https://github.com/your-org/arkts-fmt.git
+git clone git@github.com:isfk/arkts-fmt.git
 cd arkts-fmt
 bash build.sh
 ```
