@@ -102,7 +102,27 @@ jobs:
           merge-multiple: true
 
       - name: Publish release assets
-        uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5
-        with:
-          artifacts: dist/*.tar.gz,dist/*.sha256
-          generateReleaseNotes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          assets=(dist/*.tar.gz dist/*.sha256)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found under dist/"
+            find dist -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+
+          printf 'Release assets:\n'
+          printf '  %s\n' "${assets[@]}"
+
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --title "$tag" \
+              --generate-notes
+          fi
