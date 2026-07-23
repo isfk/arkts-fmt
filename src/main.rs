@@ -230,8 +230,15 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
 
         for child in children(node) {
             let child_type = child.kind();
-            if matches!(child_type, "{" | "}" | "(" | ")")
-                || (child_type == "statement_block" && node_type == "arrow_function")
+            // 括号/花括号保持当前层级
+            if matches!(child_type, "{" | "}" | "(" | ")") {
+                walk(child, current_level, line_levels);
+            // 与父节点同行的子节点（如 arrow_function 的参数）保持当前层级
+            } else if child.start_position().row == start_line {
+                walk(child, current_level, line_levels);
+            // arrow_function 的 body（statement_block 或 object）保持当前层级
+            } else if matches!(child_type, "statement_block" | "object")
+                && node_type == "arrow_function"
             {
                 walk(child, current_level, line_levels);
             } else {
@@ -324,6 +331,7 @@ fn is_block_type(node_type: &str) -> bool {
             | "template_substitution"
             | "template_type"
             | "arrow_function"
+            | "named_imports"
     )
 }
 
