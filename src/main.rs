@@ -230,8 +230,8 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
 
         for child in children(node) {
             let child_type = child.kind();
-            // 括号/花括号保持当前层级
-            if matches!(child_type, "{" | "}" | "(" | ")") {
+            // 括号/花括号/方括号保持当前层级
+            if matches!(child_type, "{" | "}" | "(" | ")" | "[" | "]") {
                 walk(child, current_level, line_levels);
             // 与父节点同行的子节点（如 arrow_function 的参数）保持当前层级
             } else if child.start_position().row == start_line {
@@ -286,7 +286,23 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
         node_type,
         "arguments" | "formal_parameters" | "type_arguments"
     ) {
-        fill_unset_levels(line_levels, start_line + 1, end_line, current_level + 1);
+        // 参数列表应比调用/声明起始行再缩进一级；嵌套在外层续行中时，继续叠加一级
+        let start_level = line_levels
+            .get(start_line)
+            .and_then(|level| *level)
+            .unwrap_or(current_level);
+        let argument_level = (current_level + 1).max(start_level + 1);
+        let end_exclusive = if has_content_on_end_line(node) {
+            end_line + 1
+        } else {
+            end_line
+        };
+        raise_levels(line_levels, start_line + 1, end_exclusive, argument_level);
+    }
+
+    // 已经换行的表达式，续行（包括结束行）至少缩进一级；不主动拆分单行表达式
+    if matches!(node_type, "ternary_expression" | "binary_expression") {
+        raise_levels(line_levels, start_line + 1, end_line + 1, current_level + 1);
     }
 
     walk_children(node, current_level, line_levels);
@@ -315,6 +331,37 @@ fn fill_unset_levels(
             *slot = Some(level);
         }
     }
+}
+
+fn raise_levels(
+    line_levels: &mut [Option<usize>],
+    start_inclusive: usize,
+    end_exclusive: usize,
+    minimum_level: usize,
+) {
+    let end = end_exclusive.min(line_levels.len());
+    for slot in line_levels.iter_mut().take(end).skip(start_inclusive) {
+        if slot.is_none_or(|level| level < minimum_level) {
+            *slot = Some(minimum_level);
+        }
+    }
+}
+
+fn has_content_on_end_line(node: Node) -> bool {
+    let node_children = children(node);
+    let Some(last_child) = node_children.last() else {
+        return false;
+    };
+
+    if !matches!(last_child.kind(), ")" | "]" | "}" | ">") {
+        return false;
+    }
+
+    node_children
+        .iter()
+        .rev()
+        .nth(1)
+        .is_some_and(|child| child.end_position().row == node.end_position().row)
 }
 
 fn is_block_type(node_type: &str) -> bool {
