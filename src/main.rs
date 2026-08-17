@@ -182,6 +182,7 @@ fn format_code(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "解析 ArkTS 失败"))?;
 
     let lines = code.split('\n').collect::<Vec<_>>();
+    let jsdoc_offsets = jsdoc_indent_offsets(&lines);
     let mut line_levels = vec![None; lines.len()];
 
     walk(tree.root_node(), 0, &mut line_levels);
@@ -196,7 +197,7 @@ fn format_code(
             } else if let Some(level) = line_levels[index] {
                 format!(
                     "{}{}",
-                    " ".repeat(level * indent_size),
+                    " ".repeat(level * indent_size + jsdoc_offsets[index]),
                     trimmed_end.trim_start()
                 )
             } else {
@@ -207,6 +208,28 @@ fn format_code(
         .join("\n");
 
     Ok(formatted)
+}
+
+fn jsdoc_indent_offsets(lines: &[&str]) -> Vec<usize> {
+    let mut offsets = vec![0; lines.len()];
+    let mut in_jsdoc = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !in_jsdoc && trimmed.starts_with("/**") && !trimmed.contains("*/") {
+            in_jsdoc = true;
+            continue;
+        }
+
+        if in_jsdoc {
+            offsets[index] = 1;
+            if trimmed.contains("*/") {
+                in_jsdoc = false;
+            }
+        }
+    }
+
+    offsets
 }
 
 fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
@@ -228,10 +251,15 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
     if is_block_type(node_type) {
         fill_unset_levels(line_levels, start_line + 1, end_line, current_level + 1);
 
-        for child in children(node) {
+        let node_children = children(node);
+        for (index, child) in node_children.iter().copied().enumerate() {
             let child_type = child.kind();
+            // 独占一行的闭合符必须回到创建该 block 的锚点
+            if is_standalone_closer(&node_children, index) {
+                set_level(line_levels, child.start_position().row, current_level);
+                walk(child, current_level, line_levels);
             // 括号/花括号/方括号保持当前层级
-            if matches!(child_type, "{" | "}" | "(" | ")" | "[" | "]") {
+            } else if matches!(child_type, "{" | "}" | "(" | ")" | "[" | "]") {
                 walk(child, current_level, line_levels);
             // 与父节点同行的子节点（如 arrow_function 的参数）保持当前层级
             } else if child.start_position().row == start_line {
@@ -262,22 +290,20 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
     }
 
     if node_type == "arkui_component_expression" {
-        let children_node = children(node)
-            .into_iter()
-            .find(|child| child.kind() == "arkui_children");
-
-        if let Some(children_node) = children_node {
-            for line in (children_node.end_position().row + 1)..=end_line {
-                if let Some(slot) = line_levels.get_mut(line) {
-                    if slot.is_none() {
-                        *slot = Some(current_level);
-                    }
-                }
-            }
-        }
-
+        let mut in_modifier_chain = false;
         for child in children(node) {
-            walk(child, current_level, line_levels);
+            if child.start_position().row > start_line
+                && matches!(child.kind(), "." | "property_identifier")
+            {
+                in_modifier_chain = true;
+            }
+
+            let child_level = if in_modifier_chain {
+                current_level + 1
+            } else {
+                current_level
+            };
+            walk(child, child_level, line_levels);
         }
         return;
     }
@@ -298,6 +324,48 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
             end_line
         };
         raise_levels(line_levels, start_line + 1, end_exclusive, argument_level);
+        walk_delimited_children(node, current_level, argument_level, line_levels);
+        return;
+    }
+
+    if node_type == "member_expression" {
+        for child in children(node) {
+            let child_level = if child.start_position().row > start_line
+                && matches!(child.kind(), "." | "property_identifier")
+            {
+                current_level + 1
+            } else {
+                current_level
+            };
+            walk(child, child_level, line_levels);
+        }
+        return;
+    }
+
+    if node_type == "call_expression" {
+        for child in children(node) {
+            let child_level = if child.kind() == "arguments" {
+                line_levels
+                    .get(child.start_position().row)
+                    .and_then(|level| *level)
+                    .unwrap_or(current_level)
+                    .max(current_level)
+            } else {
+                current_level
+            };
+            walk(child, child_level, line_levels);
+        }
+        return;
+    }
+
+    if matches!(
+        node_type,
+        "public_field_definition"
+            | "variable_declarator"
+            | "assignment_expression"
+            | "return_statement"
+    ) {
+        raise_levels(line_levels, start_line + 1, end_line + 1, current_level + 1);
     }
 
     // 已经换行的表达式，续行（包括结束行）至少缩进一级；不主动拆分单行表达式
@@ -311,6 +379,45 @@ fn walk(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
 fn walk_children(node: Node, current_level: usize, line_levels: &mut [Option<usize>]) {
     for child in children(node) {
         walk(child, current_level, line_levels);
+    }
+}
+
+fn walk_delimited_children(
+    node: Node,
+    current_level: usize,
+    content_level: usize,
+    line_levels: &mut [Option<usize>],
+) {
+    let node_children = children(node);
+    let start_line = node.start_position().row;
+    for (index, child) in node_children.iter().copied().enumerate() {
+        if is_standalone_closer(&node_children, index) {
+            set_level(line_levels, child.start_position().row, current_level);
+            walk(child, current_level, line_levels);
+        } else if child.start_position().row == start_line
+            || matches!(child.kind(), ")" | "]" | "}" | ">")
+        {
+            walk(child, current_level, line_levels);
+        } else {
+            walk(child, content_level, line_levels);
+        }
+    }
+}
+
+fn is_standalone_closer(node_children: &[Node], index: usize) -> bool {
+    let child = node_children[index];
+    if !matches!(child.kind(), "}" | ")" | "]" | ">") {
+        return false;
+    }
+
+    node_children
+        .get(index.wrapping_sub(1))
+        .is_none_or(|previous| previous.end_position().row < child.start_position().row)
+}
+
+fn set_level(line_levels: &mut [Option<usize>], line: usize, level: usize) {
+    if let Some(slot) = line_levels.get_mut(line) {
+        *slot = Some(level);
     }
 }
 
@@ -467,4 +574,61 @@ fn absolutize(cwd: &Path, arg: &str) -> PathBuf {
 
 fn display_path(cwd: &Path, path: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_parser, format_code, INDENT_SIZE};
+
+    fn assert_fixture(input: &str, expected: &str) {
+        let mut parser = create_parser().expect("create ArkTS parser");
+        let formatted = format_code(input, INDENT_SIZE, &mut parser).expect("format fixture");
+        assert_eq!(formatted, expected);
+
+        let formatted_again =
+            format_code(&formatted, INDENT_SIZE, &mut parser).expect("format fixture twice");
+        assert_eq!(formatted_again, expected, "formatter must be idempotent");
+
+        let input_without_whitespace = input
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let output_without_whitespace = formatted
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert_eq!(
+            input_without_whitespace, output_without_whitespace,
+            "formatter may only change whitespace"
+        );
+    }
+
+    macro_rules! fixture_test {
+        ($name:ident, $fixture:literal) => {
+            #[test]
+            fn $name() {
+                assert_fixture(
+                    include_str!(concat!("../tests/fixtures/", $fixture, ".input.ets")),
+                    include_str!(concat!("../tests/fixtures/", $fixture, ".expected.ets")),
+                );
+            }
+        };
+    }
+
+    fixture_test!(formats_jsdoc_alignment, "jsdoc-alignment");
+    fixture_test!(formats_arkui_modifier_chain, "arkui-modifier-chain");
+    fixture_test!(formats_arkui_callback_closure, "arkui-callback-closure");
+    fixture_test!(
+        formats_nested_if_in_gesture_callback,
+        "nested-if-in-gesture-callback"
+    );
+    fixture_test!(
+        formats_multiline_field_assignment,
+        "multiline-field-assignment"
+    );
+    fixture_test!(
+        formats_component_object_argument,
+        "component-object-argument"
+    );
+    fixture_test!(formats_nested_gesture_groups, "nested-gesture-groups");
 }
